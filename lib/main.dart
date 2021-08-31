@@ -1,8 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:google_maps_flutter_platform_interface/src/types/marker_updates.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/http.dart';
 
 void main() => runApp(MyApp());
 
@@ -25,35 +29,36 @@ MarkerId _createMarkerId(String id) {
   return MarkerId(id);
 }
 
-Marker _createMarker(MarkerId id, LatLng position, String title) {
+Marker _createMarker(dynamic place) {
+  debugPrint(place.toString());
   return Marker(
-    markerId: id,
-    position: position,
-    infoWindow: InfoWindow(title: title, snippet: '*'),
+    markerId: _createMarkerId(place['placeId']),
+    position: LatLng(place['latitude'], place['longitude']),
+    infoWindow: InfoWindow(title: place['placeId'], snippet: '*'),
     // onTap: () {
     //   _onMarkerTapped(markerId);
     // },
   );
 }
 
-class MapSampleState extends State<MapSample> {
-  Map<MarkerId, Marker> markers = <MarkerId, Marker>{
-    _createMarkerId("1"): _createMarker(_createMarkerId("1"), LatLng(-5.8268322, -35.21461), "Arena das Dunas"),
-    _createMarkerId("2"): _createMarker(_createMarkerId("2"), LatLng(-5.8370091,-35.2199315), "UBS Candelária"),
-    _createMarkerId("3"): _createMarker(_createMarkerId("3"), LatLng(-5.8616649,-35.1949278), "Universidade Potiguar - Unidade Roberto Freire"),
-    _createMarkerId("4"): _createMarker(_createMarkerId("4"), LatLng(-5.7333716,-35.2560076), "Ginásio Municipal Nélio Dias"),
-    _createMarkerId("5"): _createMarker(_createMarkerId("5"), LatLng(-5.8409889,-35.2113981), "Via Direta"),
-    _createMarkerId("6"): _createMarker(_createMarkerId("6"), LatLng(-5.5790832,-36.919452), "UBS Dom Elizeu"),
-  };
+Future<http.Response> sendPosition(Position position) {
+  return http.post(
+    Uri.http('192.168.0.13:9000', '/kafka/publish/positions'),
+    headers: <String, String>{
+      'Content-Type': 'application/json; charset=UTF-8',
+    },
+    body: jsonEncode(<String, Object>{
+      'userId': "1234",
+      'lat': position.latitude,
+      'lng': position.longitude
+    }),
+  );
+}
 
-  // final Marker marker = Marker(
-  //   markerId: MarkerId("1"),
-  //   position: LatLng(-5.8268322, -35.21461),
-  //   infoWindow: InfoWindow(title: "Arena das Dunas", snippet: '*'),
-  //   // onTap: () {
-  //   //   _onMarkerTapped(markerId);
-  //   // },
-  // );
+class MapSampleState extends State<MapSample> {
+
+  // Map<MarkerId, Marker> markers = <MarkerId, Marker>{};
+  Set<Marker> markers = Set();
 
   Completer<GoogleMapController> _controller = Completer();
 
@@ -72,7 +77,8 @@ class MapSampleState extends State<MapSample> {
     this._determinePosition()
         .then((positionStream) => positionStream.listen(
             (Position position) {
-              debugPrint('lat: ${position.latitude}, long: ${position.longitude}');
+              // debugPrint('lat: ${position.latitude}, long: ${position.longitude}');
+              sendPosition(position);
             })
         );
 
@@ -83,7 +89,11 @@ class MapSampleState extends State<MapSample> {
         onMapCreated: (GoogleMapController controller) {
           _controller.complete(controller);
         },
-        markers: Set<Marker>.of(markers.values),
+        myLocationEnabled: true,
+        onCameraIdle: () {
+          _updateMap();
+        },
+        markers: markers,
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _goToTheLake,
@@ -91,6 +101,38 @@ class MapSampleState extends State<MapSample> {
         icon: Icon(Icons.location_on),
       ),
     );
+  }
+
+  Future<List<dynamic>> getPositions(LatLngBounds bounds) async {
+    var queryParameters = {
+      'swLat': '${bounds.southwest.latitude}',
+      'swLng': '${bounds.southwest.longitude}',
+      'neLat': '${bounds.northeast.latitude}',
+      'neLng': '${bounds.northeast.longitude}'
+    };
+    return http.get(
+        Uri.http('192.168.0.13:9000', '/places/', queryParameters),
+        headers: <String, String>{
+          'Content-Type': 'application/json; charset=UTF-8',
+        }
+    ).then((value) => json.decode(value.body));
+  }
+
+  void _updateMap() async {
+    final GoogleMapController controller = await _controller.future;
+    var visibleRegion = controller.getVisibleRegion();
+
+    // Map<MarkerId, Marker> newMarkers =  await visibleRegion
+    List<Marker> updatedMarkers = await visibleRegion
+        .then((bounds) => getPositions(bounds))
+        .then((places) => places.map((place) => _createMarker(place)).toList());
+        // .then((markersList) => Map<MarkerId, Marker>.fromIterable(markersList, key: (e) => e.markerId, value: (e) => e));
+
+    setState(() {
+      // markers = [];
+      markers = Set();
+      markers = Set.from(updatedMarkers);
+    });
   }
 
   Future<void> _goToTheLake() async {
@@ -135,6 +177,9 @@ class MapSampleState extends State<MapSample> {
     // // continue accessing the position of the device.
     // return await Geolocator.getCurrentPosition();
 
-    return Geolocator.getPositionStream();
+    return Geolocator.getPositionStream(
+      desiredAccuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 10,
+    );
   }
 }
